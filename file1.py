@@ -1,90 +1,71 @@
 import cv2
 import numpy as np
 
-# Load the Haar Cascade face detector
+# Load the Haar Cascades for frontal and profile face detection
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
-# Paths to your model files
-model_path = 'mobilenet_iter_73000.caffemodel'  # Your model weights file
-config_path = 'deploy.prototxt.txt'    # Your model config file
-
-# Load the MobileNet SSD model
-net = cv2.dnn.readNetFromCaffe(config_path, model_path)
-
-# Define class labels for objects that MobileNet-SSD can detect
-CLASSES = [
-    "background", "aeroplane", "bicycle", "bird", "boat",
-    "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-    "dog", "horse", "motorbike", "person", "pottedplant",
-    "sheep", "sofa", "train", "tvmonitor"
-]
+profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
 
 # Open the video file
-video_path = 'video4.mp4'  # Replace with your actual video file path
+video_path = 'video.mp4'  # Replace with your actual video file path
 cap = cv2.VideoCapture(video_path)
 
 if not cap.isOpened():
     print("Error: Could not open video.")
     exit()
 
+# Initialize trackers list
+trackers = []
+tracker_type = 'KCF'  # KCF is faster but less precise with rotations
+
+# Detection frequency
+detection_interval = 15  # Detect every 15 frames
+frame_count = 0
+
+# Video properties for frame rate management
+fps = cap.get(cv2.CAP_PROP_FPS)
+frame_delay = int(1000 / fps) if fps > 0 else 1
+
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
-        print("End of video or cannot read frame.")
         break
 
-    # Prepare the frame for object detection
-    blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
-    net.setInput(blob)
-    detections = net.forward()
+    # Reduce frame size for faster processing
+    small_frame = cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2))
+    gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
-    # Process detections
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
+    frame_count += 1
 
-        if confidence > 0.5:  # Confidence threshold
-            idx = int(detections[0, 0, i, 1])
+    # Run face detection every `detection_interval` frames
+    if frame_count % detection_interval == 0:
+        faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5)
+        profiles = profile_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5)
 
-            # If the detected object is a person
-            if CLASSES[idx] == "person":
-                # Get bounding box
-                box = detections[0, 0, i, 3:7] * [frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]]
-                (startX, startY, endX, endY) = box.astype("int")
+        detected_faces = list(faces) + list(profiles)
 
-                # Ensure bounding box is within frame dimensions
-                startX = max(0, startX)
-                startY = max(0, startY)
-                endX = min(frame.shape[1], endX)
-                endY = min(frame.shape[0], endY)
+        # Clear previous trackers and add new ones for detected faces
+        trackers = []
+        for (x, y, w, h) in detected_faces:
+            x, y, w, h = x * 2, y * 2, w * 2, h * 2  # Scale back to original frame size
+            tracker = cv2.TrackerKCF_create()  # KCF tracker for faster performance
+            tracker.init(frame, (x, y, w, h))
+            trackers.append(tracker)
 
-                # Check if the area is valid
-                if endX > startX and endY > startY:
-                    # Extract the person's area for face detection
-                    person_area = frame[startY:endY, startX:endX]
+    # Update trackers and apply blur on tracked regions
+    for tracker in trackers:
+        success, bbox = tracker.update(frame)
+        if success:
+            x, y, w, h = [int(v) for v in bbox]
+            face_area = frame[y:y + h, x:x + w]
+            if face_area.size > 0:
+                blurred_face = cv2.GaussianBlur(face_area, (21, 21), 15)
+                frame[y:y + h, x:x + w] = blurred_face
 
-                    # Convert to grayscale for face detection
-                    gray_person_area = cv2.cvtColor(person_area, cv2.COLOR_BGR2GRAY)
-                    # Detect faces in the person's area
-                    faces = face_cascade.detectMultiScale(gray_person_area, scaleFactor=1.1, minNeighbors=5)
-
-                    # Blur detected faces
-                    for (fx, fy, fw, fh) in faces:
-                        # Ensure the coordinates are within the bounds of the original frame
-                        fx, fy, fw, fh = startX + fx, startY + fy, fw, fh
-                        # Extract the face area
-                        face_area = frame[fy:fy + fh, fx:fx + fw]
-                        if face_area.size > 0:
-                            blurred_face = cv2.GaussianBlur(face_area, (25, 25), 30)  # Adjust blur parameters as needed
-                            frame[fy:fy + fh, fx:fx + fw] = blurred_face  # Replace the face area with the blurred version
-
-                else:
-                    print(f"Invalid bounding box coordinates: start=({startX}, {startY}), end=({endX}, {endY})")
-
-    # Display the frame with the blurred face
+    # Display the frame at the original frame rate
     cv2.imshow("Blurred Face in Video", frame)
 
     # Exit on pressing 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(frame_delay) & 0xFF == ord('q'):
         break
 
 # Release resources
