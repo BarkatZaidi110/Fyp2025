@@ -1,87 +1,91 @@
 import cv2
-import numpy as np
+import face_recognition
+import time
 
-# Load Haar Cascades for frontal and profile face detection
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
+# Load the target image and encode the face
+target_image = face_recognition.load_image_file("pic1.png")
+target_encodings = face_recognition.face_encodings(target_image)
 
-# Open the video file
-video_path = 'video.mp4'  # Replace with your actual video file path
+if len(target_encodings) == 0:
+    print("Error: No face detected in the target image.")
+    exit()
+
+target_encoding = target_encodings[0]
+
+# Load the video
+video_path = "video2.mp4"
 cap = cv2.VideoCapture(video_path)
 
 if not cap.isOpened():
-    print("Error: Could not open video.")
+    print("Error: Could not open video file.")
     exit()
 
-# List to store individual trackers for each detected face
-trackers = []
-tracker_type = 'KCF'  # KCF is faster but may be less precise with rotations
+# Get video properties
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-# Detection frequency
-detection_interval = 30  # Detect every 30 frames
+print(f"Video properties: {width}x{height}, {fps} FPS, {total_frames} frames.")
+
+# Video writer to save the output
+output_path = "optimized_output_video.mp4"
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+# Processing optimizations
+skip_frames = 2  # Skip every second frame to speed up
 frame_count = 0
+start_time = time.time()
 
-# Video properties for frame rate management
-fps = cap.get(cv2.CAP_PROP_FPS)
-frame_delay = int(1000 / fps) if fps > 0 else 1
-
-while cap.isOpened():
+while True:
     ret, frame = cap.read()
     if not ret:
         break
 
     frame_count += 1
-    faces_detected = 0  # Count of faces detected in each frame
-    blurred_faces = 0  # Count of faces successfully blurred in each frame
 
-    # Only run face detection every `detection_interval` frames
-    if frame_count % detection_interval == 0:
-        # Resize frame for faster processing based on resolution
-        scale_percent = 50  # Adjust based on video size
-        width = int(frame.shape[1] * scale_percent / 100)
-        height = int(frame.shape[0] * scale_percent / 100)
-        small_frame = cv2.resize(frame, (width, height))
-        gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+    # Skip processing on certain frames for faster performance
+    if frame_count % skip_frames != 0:
+        out.write(frame)
+        continue
 
-        # Detect faces and profiles
-        faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5)
-        profiles = profile_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5)
+    # Resize frame for faster face detection
+    small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)  # 50% smaller
+    rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        detected_faces = list(faces) + list(profiles)
-        faces_detected = len(detected_faces)
+    # Detect faces and encode
+    face_locations = face_recognition.face_locations(rgb_small_frame, model="hog")
+    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
 
-        # Clear previous trackers and add new ones for detected faces
-        trackers = []
-        for (x, y, w, h) in detected_faces:
-            x, y, w, h = int(x * 2), int(y * 2), int(w * 2), int(h * 2)  # Scale to original frame size
-            tracker = cv2.TrackerKCF_create()  # Create a KCF tracker
-            tracker.init(frame, (x, y, w, h))
-            trackers.append(tracker)
+    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+        matches = face_recognition.compare_faces([target_encoding], face_encoding, tolerance=0.6)
 
-    # Update trackers and apply blur on tracked regions
-    for idx, tracker in enumerate(trackers):
-        success, bbox = tracker.update(frame)
-        if success:
-            x, y, w, h = [int(v) for v in bbox]
-            face_area = frame[y:y + h, x:x + w]
-            if face_area.size > 0:
-                blurred_face = cv2.GaussianBlur(face_area, (21, 21), 15)
-                frame[y:y + h, x:x + w] = blurred_face
-                blurred_faces += 1
-                print(f"Frame {frame_count}: Tracker {idx + 1} successfully blurred at position {x}, {y}, {w}, {h}.")
-        else:
-            print(f"Frame {frame_count}: Tracker {idx + 1} lost.")
+        if matches[0]:
+            # Adjust coordinates back to original frame size
+            top *= 2
+            right *= 2
+            bottom *= 2
+            left *= 2
 
-    # Print a summary for the current frame
-    print(f"Frame {frame_count}: {faces_detected} face(s) detected, {blurred_faces} face(s) blurred.")
+            # Blur the face
+            face_roi = frame[top:bottom, left:right]
+            blurred_face = cv2.GaussianBlur(face_roi, (31, 31), 30)
+            frame[top:bottom, left:right] = blurred_face
 
-    # Display the frame at the original frame rate
-    cv2.imshow("Blurred Face in Video", frame)
+    # Write the processed frame to output
+    out.write(frame)
 
-    # Exit on pressing 'q'
-    if cv2.waitKey(frame_delay) & 0xFF == ord('q'):
+    # Optional: Display video during processing
+    cv2.imshow("Processing Video", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
+end_time = time.time()
+print(f"Processing complete in {end_time - start_time:.2f} seconds for {frame_count} frames.")
+print("Output saved to:", output_path)
 
 # Release resources
 cap.release()
+out.release()
 cv2.destroyAllWindows()
